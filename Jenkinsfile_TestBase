@@ -1,0 +1,100 @@
+@Library("shared-libraries")
+import io.libs.SqlUtils
+import io.libs.ProjectHelpers
+import io.libs.Utils
+
+def sqlUtils = new SqlUtils()
+def utils = new Utils()
+def projectHelpers = new ProjectHelpers()
+
+pipeline
+{
+
+    parameters {
+        string(defaultValue: '--ras 172.23.60.12:2845 --cluster-name Main --cluster-admin dm_sql --cluster-pwd 076741141asdZXC --db-user Brick --db-pwd 123 --with-nolock', description: 'Подключение к кластеру тестовых баз от имени администратора', name: 'clusterConnection')
+        string(defaultValue: '--db-user Brick --db-pwd 123 --ibconnection /S172.23.60.12\\', description: 'Подключение к тестовой базе', name: 'baseConnection')
+        string(defaultValue: 'D:\\Jenkins\\src', description: 'Путь к XML исходникам', name: 'srcLocation')
+    }
+
+    agent {
+        label 'Updater'
+    }
+
+    stages {
+		
+        stage("Fetching last release from GitLab") {
+            steps {
+                timestamps {
+                    dir('D:\\Jenkins\\digitaltrade') {
+                        checkout([$class: 'GitSCM', branches: [[name: 'origin/develop']], browser: [$class: 'GitLab', repoUrl: 'http://172.23.60.11/1c/digitaltrade'], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'digitaltrade_gitlab', refspec: '+refs/heads/develop:refs/remotes/origin/develop', url: 'http://172.23.60.11/1c/digitaltrade.git']]])
+                    }
+                }
+            }
+        }
+		
+        stage("Convertation from EDT to XML format") {
+            steps {
+                timestamps {
+                    script {
+                        // Очищаем папку XML исходников
+                        clearDir(srcLocation)
+                        // Конвертируем из формата EDT в XML
+                        returnCode = utils.cmd("ring edt workspace export --project D:\\Jenkins\\digitaltrade\\UNF --configuration-files ${srcLocation} --workspace-location D:\\Jenkins\\Agent\\workspace")
+                        if (returnCode != 0) {
+                            utils.raiseError("Возникла ошибка при конвертации исходников формата EDT в XML")
+                        }
+                    }
+                }
+            }
+        }
+
+        stage("Start of test bases update") {
+            steps {
+                timestamps {
+                    script {
+                        // Base 1
+                        updateBase("Main_Test1")
+                        // Base 2
+                        updateBase("Main_Test2")
+                        // Base 3
+                        updateBase("Main_Test3")
+                    }
+                }
+            }
+        }
+
+    }
+}
+
+def clearDir(dirPath) {
+    def utils = new Utils()
+    utils.cmd("rmdir ${dirPath} /S /Q")
+    utils.cmd("mkdir ${dirPath}")
+}
+
+def updateBase(baseName) {
+    stage("Update of ${baseName}") {
+        timestamps {
+            def utils = new Utils()
+            baseConnectionLine = "${baseConnection}${baseName}"
+            updateExecutionKeys = '"ЗапуститьОбновлениеИнформационнойБазы;ЗавершитьРаботуСистемы;"'
+            close1CPath = '"$runnerRoot\\epf\\ЗакрытьПредприятие.epf"'
+
+            // Убиваем активные сессии
+            returnCode = utils.cmd("vrunner session kill ${clusterConnection} --db ${baseName}")
+            if (returnCode != 0) {
+                utils.raiseError("Возникла ошибка при завершении сеансов базы ${baseName}")
+            }
+            // Обновляем базу
+            returnCode = utils.cmd("vrunner update-dev ${baseConnectionLine} --src ${srcLocation}")
+            if (returnCode != 0) {
+                utils.raiseError("Возникла ошибка при завершении обновлении базы ${baseName}")
+            }
+            // Запускаем базу с ключем обновления и обработкой закрытия базы по окончанию обновления
+            returnCode = utils.cmd("vrunner run ${baseConnectionLine} --command ${updateExecutionKeys} --execute ${close1CPath}")
+            if (returnCode != 0) {
+                utils.raiseError("Возникла ошибка при выполнении процедур обновления базы ${baseName}")
+            }
+        }
+    }
+}
