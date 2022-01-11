@@ -11,9 +11,15 @@ pipeline
 {
 
     parameters {
-        string(defaultValue: '--ras 172.23.60.12:2845 --cluster-name Main --cluster-admin dm_sql --cluster-pwd 076741141asdZXC --db-user Brick --db-pwd 123 --with-nolock', description: 'Подключение к кластеру тестовых баз от имени администратора', name: 'clusterConnection')
-        string(defaultValue: '--db-user Brick --db-pwd 123 --ibconnection /S172.23.60.12\\', description: 'Подключение к тестовой базе', name: 'baseConnection')
-        string(defaultValue: 'D:\\Jenkins\\src', description: 'Путь к XML исходникам', name: 'srcLocation')
+        booleanParam(name: 'updateBase1', defaultValue: true, description: 'Обновлять тестовую базу 1')
+        booleanParam(name: 'updateBase2', defaultValue: true, description: 'Обновлять тестовую базу 2')
+        booleanParam(name: 'updateBase3', defaultValue: true, description: 'Обновлять тестовую базу 3')
+        booleanParam(name: 'updateBase4', defaultValue: true, description: 'Обновлять тестовую базу 4')       
+        string(name: 'clusterConnection', defaultValue: '--ras 172.23.60.12:2845 --cluster-name Main --cluster-admin dm_sql --cluster-pwd 076741141asdZXC --db-user Brick --db-pwd 123', description: 'Подключение к кластеру тестовых баз от имени администратора')
+        string(name: 'baseConnection', defaultValue: '--db-user Brick --db-pwd 123 --ibconnection /S172.23.60.12\\', description: 'Подключение к тестовой базе')
+        string(name: 'uccode', defaultValue: '148841', description: 'Ключ блокировки базы')
+        string(name: 'srcLocation', defaultValue: 'D:\\Jenkins\\src', description: 'Путь к XML исходникам')
+        string(name: 'updateFilePath', defaultValue: 'D:\\Jenkins\\update', description: 'Путь к обработке запуска процедур обновления')
     }
 
     agent {
@@ -53,11 +59,25 @@ pipeline
                 timestamps {
                     script {
                         // Base 1
-                        updateBase("Main_Test1")
+                        if (params.updateBase1) {
+                            updateBase("Main_Test1")
+                        }
                         // Base 2
-                        updateBase("Main_Test2")
+                        if (params.updateBase2) {
+                            updateBase("Main_Test2")
+                        }
                         // Base 3
-                        updateBase("Main_Test3")
+                        if (params.updateBase3) {
+                            updateBase("Main_Test3")
+                        }
+                        // Base 4
+                        if (params.updateBase4) {
+                            updateBase("Main_Test4")
+                        }
+                        // Clearing update file path
+                        if (params.updateBase1 && params.updateBase2 && params.updateBase3 && params.updateBase4) {
+                            clearDir("${updateFilePath}")
+                        }
                     }
                 }
             }
@@ -79,22 +99,36 @@ def updateBase(baseName) {
             baseConnectionLine = "${baseConnection}${baseName}"
             updateExecutionKeys = '"ЗапуститьОбновлениеИнформационнойБазы;ЗавершитьРаботуСистемы;"'
             close1CPath = '"$runnerRoot\\epf\\ЗакрытьПредприятие.epf"'
+            updateFile = "${updateFilePath}\\ВыполнитьПроцедурыОбновления.epf"
 
             // Убиваем активные сессии
-            returnCode = utils.cmd("vrunner session kill ${clusterConnection} --db ${baseName}")
+            returnCode = utils.cmd("vrunner session kill ${clusterConnection} --db ${baseName} --uccode ${uccode}")
             if (returnCode != 0) {
                 utils.raiseError("Возникла ошибка при завершении сеансов базы ${baseName}")
             }
             // Обновляем базу
-            returnCode = utils.cmd("vrunner update-dev ${baseConnectionLine} --src ${srcLocation}")
+            returnCode = utils.cmd("vrunner update-dev ${baseConnectionLine} --src ${srcLocation} --uccode ${uccode}")
             if (returnCode != 0) {
                 utils.raiseError("Возникла ошибка при завершении обновлении базы ${baseName}")
             }
             // Запускаем базу с ключем обновления и обработкой закрытия базы по окончанию обновления
-            returnCode = utils.cmd("vrunner run ${baseConnectionLine} --command ${updateExecutionKeys} --execute ${close1CPath}")
+            returnCode = utils.cmd("vrunner run ${baseConnectionLine} --command ${updateExecutionKeys} --execute ${close1CPath} --uccode ${uccode}")
             if (returnCode != 0) {
                 utils.raiseError("Возникла ошибка при выполнении процедур обновления базы ${baseName}")
             }
+            // Если есть обработка запуска процедур обновления
+            // Запустим обработку выполнения процедур обновления, которая закроет базу после выполнения
+            if (fileExists ("${updateFile}")) {
+                returnCode = utils.cmd("vrunner run ${baseConnectionLine} --execute ${updateFile} --uccode ${uccode}")
+                if (returnCode != 0) {
+                    utils.raiseError("Возникла ошибка при запуске обработки запуска процедур обновления в базе ${baseName}")
+                }
+            }
+            // Разблокируем базу
+            returnCode = utils.cmd("vrunner session unlock ${clusterConnection} --db ${baseName} --uccode ${uccode}")
+            if (returnCode != 0) {
+                utils.raiseError("Возникла ошибка при разблокировке базы ${baseName}")
+            }            
         }
     }
 }
