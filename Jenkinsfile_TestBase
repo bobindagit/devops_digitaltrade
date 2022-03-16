@@ -7,6 +7,14 @@ def sqlUtils = new SqlUtils()
 def utils = new Utils()
 def projectHelpers = new ProjectHelpers()
 
+// Parallel tasks
+def killTasks = [:]
+def updateTasks = [:]
+def unlockTasks = [:]
+def postUpdateTasks1 = [:]
+def postUpdateTasks2 = [:]
+def backupTasks = [:]
+
 pipeline
 {
 
@@ -14,25 +22,32 @@ pipeline
         booleanParam(name: 'updateBase1', defaultValue: true, description: 'Обновлять тестовую базу 1')
         booleanParam(name: 'updateBase2', defaultValue: true, description: 'Обновлять тестовую базу 2')
         booleanParam(name: 'updateBase3', defaultValue: true, description: 'Обновлять тестовую базу 3')
-        booleanParam(name: 'updateBase4', defaultValue: true, description: 'Обновлять тестовую базу 4')       
+        booleanParam(name: 'updateBase4', defaultValue: true, description: 'Обновлять тестовую базу 4')
+        string(name: 'baseCount', defaultValue: "4", description: 'Общее количество тестовых баз')
+        string(name: 'uccode', defaultValue: '148841', description: 'Ключ блокировки базы')
         string(name: 'clusterConnection', defaultValue: '--ras 172.23.60.12:2845 --cluster-name Main --cluster-admin dm_sql --cluster-pwd 076741141asdZXC --db-user Brick --db-pwd 123', description: 'Подключение к кластеру тестовых баз от имени администратора')
         string(name: 'baseConnection', defaultValue: '--db-user Brick --db-pwd 123 --ibconnection /S172.23.60.12\\', description: 'Подключение к тестовой базе')
-        string(name: 'uccode', defaultValue: '148841', description: 'Ключ блокировки базы')
-        string(name: 'srcLocation', defaultValue: 'D:\\Jenkins\\src', description: 'Путь к XML исходникам')
         string(name: 'updateFilePath', defaultValue: 'D:\\Jenkins\\update', description: 'Путь к обработке запуска процедур обновления')
+        string(name: 'dtFilePath', defaultValue: 'D:\\Jenkins\\DT', description: 'Путь выгрузки архивов баз')
     }
 
     agent {
         label 'Updater'
     }
 
+    environment {
+        close1CPath = '"$runnerRoot\\epf\\ЗакрытьПредприятие.epf"'
+        updateExecutionKeys = '"ЗапуститьОбновлениеИнформационнойБазы;ЗавершитьРаботуСистемы;"'
+        updateFile = "${updateFilePath}\\ВыполнитьПроцедурыОбновления.epf"
+    }
+
     stages {
-		
+
         stage("Fetching last release from GitLab") {
             steps {
                 timestamps {
-                    dir('D:\\Jenkins\\digitaltrade') {
-                        checkout([$class: 'GitSCM', branches: [[name: 'origin/develop']], browser: [$class: 'GitLab', repoUrl: 'http://172.23.60.11/1c/digitaltrade'], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'digitaltrade_gitlab', refspec: '+refs/heads/develop:refs/remotes/origin/develop', url: 'http://172.23.60.11/1c/digitaltrade.git']]])
+                    dir("${WORKSPACE}\\digitaltrade") {
+                        checkout([$class: 'GitSCM', branches: [[name: 'origin/develop']], browser: [$class: 'GitLab', repoUrl: 'https://git.mobilife.md/1c/digitaltrade'], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'digitaltrade_gitlab', refspec: '+refs/heads/develop:refs/remotes/origin/develop', url: 'https://git.mobilife.md/1c/digitaltrade.git']]])
                     }
                 }
             }
@@ -43,9 +58,9 @@ pipeline
                 timestamps {
                     script {
                         // Очищаем папку XML исходников
-                        clearDir(srcLocation)
+                        clearDir("${WORKSPACE}\\src")
                         // Конвертируем из формата EDT в XML
-                        returnCode = utils.cmd("ring edt workspace export --project D:\\Jenkins\\digitaltrade\\UNF --configuration-files ${srcLocation} --workspace-location D:\\Jenkins\\Agent\\workspace")
+                        returnCode = utils.cmd("ring edt workspace export --project ${WORKSPACE}\\digitaltrade\\UNF --configuration-files ${WORKSPACE}\\src --workspace-location ${WORKSPACE}")
                         if (returnCode != 0) {
                             utils.raiseError("Возникла ошибка при конвертации исходников формата EDT в XML")
                         }
@@ -53,36 +68,118 @@ pipeline
                 }
             }
         }
-
-        stage("Start of test bases update") {
+        
+        stage("Killing active sessions") {
             steps {
                 timestamps {
                     script {
-                        // Base 1
-                        if (params.updateBase1) {
-                            updateBase("Main_Test1")
+                        for(i = 1; i < params.baseCount.toInteger() + 1; i++) {
+                            if (params["updateBase${i}"]) {
+                                currentBase = "Main_Test${i}"
+                                killTasks["killTask_${currentBase}"] = killActiveSessions(currentBase)
+                            }
                         }
-                        // Base 2
-                        if (params.updateBase2) {
-                            updateBase("Main_Test2")
-                        }
-                        // Base 3
-                        if (params.updateBase3) {
-                            updateBase("Main_Test3")
-                        }
-                        // Base 4
-                        if (params.updateBase4) {
-                            updateBase("Main_Test4")
-                        }
-                        // Clearing update file path
-                        if (params.updateBase1 && params.updateBase2 && params.updateBase3 && params.updateBase4) {
-                            clearDir("${updateFilePath}")
-                        }
+                        parallel killTasks
                     }
                 }
             }
         }
 
+        stage("Test bases update") {
+            steps {
+                timestamps {
+                    script {
+                        for(i = 1; i < params.baseCount.toInteger() + 1; i++) {
+                            if (params["updateBase${i}"]) {
+                                currentBase = "Main_Test${i}"
+                                updateTasks["updateTask_${currentBase}"] = updateBase(currentBase)
+                            }
+                        }
+                        parallel updateTasks
+                    }
+                }
+            }
+        }
+
+        stage("Post update procedures") {
+            steps {
+                timestamps {
+                    script {
+                        for(i = 1; i < params.baseCount.toInteger() + 1; i++) {
+                            if (params["updateBase${i}"]) {
+                                currentBase = "Main_Test${i}"
+                                postUpdateTasks1["postUpdateTask1_${currentBase}"] = postUpdateProcedures(currentBase)
+                            }
+                        }
+                        parallel postUpdateTasks1
+                    }
+                }
+            }
+        }
+
+        stage("Post update custom procedures") {
+            steps {
+                timestamps {
+                    script {
+                        for(i = 1; i < params.baseCount.toInteger() + 1; i++) {
+                            if (params["updateBase${i}"]) {
+                                currentBase = "Main_Test${i}"
+                                postUpdateTasks2["postUpdateTask2_${currentBase}"] = postUpdateCustomProcedures(currentBase)
+                            }
+                        }
+                        parallel postUpdateTasks2
+                    }
+                }
+            }
+        }
+
+        stage("Backup of the bases") {
+            steps {
+                timestamps {
+                    script {
+                        for(i = 1; i < params.baseCount.toInteger() + 1; i++) {
+                            if (params["updateBase${i}"]) {
+                                currentBase = "Main_Test${i}"
+                                backupTasks["backupTask_${currentBase}"] = backupBase(currentBase)
+                            }
+                        }
+                        parallel backupTasks
+                    }
+                }
+            }
+        }
+
+    }
+ 
+    post {
+        success {
+            timestamps {
+                script {
+                    clearUpdateFilePath = true
+                    for(i = 1; i < params.baseCount.toInteger() + 1; i++) {
+                        if (params["updateBase${i}"] == false) {
+                            clearUpdateFilePath = false
+                            break 
+                        }
+                    }
+                    // Clearing update file path
+                    if (clearUpdateFilePath) {
+                        clearDir("${updateFilePath}")
+                    }
+                }
+            }
+        }
+        always {
+            timestamps {
+                script {
+                    for(i = 1; i < params.baseCount.toInteger() + 1; i++) {
+                        currentBase = "Main_Test${i}"
+                        unlockTasks["unlockTask_${currentBase}"] = unlockBase(currentBase)
+                    }
+                    parallel unlockTasks
+                }
+            }
+        }
     }
 }
 
@@ -92,43 +189,84 @@ def clearDir(dirPath) {
     utils.cmd("mkdir ${dirPath}")
 }
 
-def updateBase(baseName) {
-    stage("Update of ${baseName}") {
-        timestamps {
-            def utils = new Utils()
-            baseConnectionLine = "${baseConnection}${baseName}"
-            updateExecutionKeys = '"ЗапуститьОбновлениеИнформационнойБазы;ЗавершитьРаботуСистемы;"'
-            close1CPath = '"$runnerRoot\\epf\\ЗакрытьПредприятие.epf"'
-            updateFile = "${updateFilePath}\\ВыполнитьПроцедурыОбновления.epf"
-
-            // Убиваем активные сессии
-            returnCode = utils.cmd("vrunner session kill ${clusterConnection} --db ${baseName} --uccode ${uccode}")
-            if (returnCode != 0) {
-                utils.raiseError("Возникла ошибка при завершении сеансов базы ${baseName}")
-            }
-            // Обновляем базу
-            returnCode = utils.cmd("vrunner update-dev ${baseConnectionLine} --src ${srcLocation} --uccode ${uccode}")
-            if (returnCode != 0) {
-                utils.raiseError("Возникла ошибка при завершении обновлении базы ${baseName}")
-            }
-            // Запускаем базу с ключем обновления и обработкой закрытия базы по окончанию обновления
-            returnCode = utils.cmd("vrunner run ${baseConnectionLine} --command ${updateExecutionKeys} --execute ${close1CPath} --uccode ${uccode}")
-            if (returnCode != 0) {
-                utils.raiseError("Возникла ошибка при выполнении процедур обновления базы ${baseName}")
-            }
-            // Если есть обработка запуска процедур обновления
-            // Запустим обработку выполнения процедур обновления, которая закроет базу после выполнения
-            if (fileExists ("${updateFile}")) {
-                returnCode = utils.cmd("vrunner run ${baseConnectionLine} --execute ${updateFile} --uccode ${uccode}")
+def killActiveSessions(baseName) {
+    return {
+        stage("Killing active sessions (${baseName})") {
+            timestamps {
+                utils = new Utils()
+                returnCode = utils.cmd("vrunner session kill ${clusterConnection} --db ${baseName} --uccode ${uccode}")
                 if (returnCode != 0) {
-                    utils.raiseError("Возникла ошибка при запуске обработки запуска процедур обновления в базе ${baseName}")
+                    utils.raiseError("Возникла ошибка при завершении сеансов базы ${baseName}")
                 }
             }
-            // Разблокируем базу
-            returnCode = utils.cmd("vrunner session unlock ${clusterConnection} --db ${baseName} --uccode ${uccode}")
-            if (returnCode != 0) {
-                utils.raiseError("Возникла ошибка при разблокировке базы ${baseName}")
-            }            
+        }
+    }
+}
+
+def updateBase(baseName) {
+    return {
+        stage("Test base update (${baseName})") {
+            timestamps {
+                baseConnectionLine = "${baseConnection}${baseName}"
+                returnCode = utils.cmd("vrunner update-dev ${baseConnectionLine} --src ${WORKSPACE}\\src --uccode ${uccode} --nocacheuse")
+                if (returnCode != 0) {
+                    utils.raiseError("Возникла ошибка при обновлении базы ${baseName}")
+                }
+            }
+        }
+    }
+}
+
+def postUpdateProcedures(baseName) {
+    return {
+        stage("Post update procedures (${baseName})") {
+            timestamps {
+                baseConnectionLine = "${baseConnection}${baseName}"
+                returnCode = utils.cmd("vrunner run ${baseConnectionLine} --command ${env.updateExecutionKeys} --execute ${env.close1CPath} --uccode ${uccode}")
+                if (returnCode != 0) {
+                    utils.raiseError("Возникла ошибка при выполнении процедур обновления базы ${baseName}")
+                }
+            }
+        }
+    }
+}
+
+def postUpdateCustomProcedures(baseName) {
+    return {
+        stage("Post update custom procedures (${baseName})") {
+            timestamps {
+                baseConnectionLine = "${baseConnection}${baseName}"
+                if (fileExists ("${env.updateFile}")) {
+                    returnCode = utils.cmd("vrunner run ${baseConnectionLine} --execute ${env.updateFile} --uccode ${uccode}")
+                    if (returnCode != 0) {
+                        utils.raiseError("Возникла ошибка при запуске обработки запуска процедур обновления в базе ${baseName}")
+                    }
+                }
+            }
+        }
+    }
+}
+
+def backupBase(baseName) {
+    return {
+        stage("Backup of the base (${baseName})") {
+            timestamps {
+                baseConnectionLine = "${baseConnection}${baseName}"
+                dtFile = "${dtFilePath}\\${baseName}.dt"
+                returnCode = utils.cmd("vrunner dump ${dtFile} ${baseConnectionLine} --uccode ${uccode}")
+                if (returnCode != 0) {
+                    utils.raiseError("Возникла ошибка при выгрузке базы ${baseName}")
+                }
+            }
+        }
+    }
+}
+
+def unlockBase(baseName) {
+    return {
+        returnCode = utils.cmd("vrunner session unlock ${clusterConnection} --db ${baseName} --uccode ${uccode}")
+        if (returnCode != 0) {
+            utils.raiseError("Возникла ошибка при разблокировке базы ${baseName}")
         }
     }
 }
